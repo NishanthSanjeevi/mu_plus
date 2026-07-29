@@ -228,6 +228,14 @@ InitializeLogIndexFile (
   return Status;
 }
 
+STATIC
+UINTN
+BuildEndOfFileMarker (
+  OUT CHAR8  *EndOfLogMessage,
+  IN  UINTN  EndOfLogMessageSize,
+  IN  UINTN  RoomLeft
+  );
+
 /**
     WriteEndOfFileMarker - Construct the END_OF_LOG message
 
@@ -246,28 +254,8 @@ WriteEndOfFileMarker (
   CHAR8       EndOfLogMessage[64];
   UINTN       EndOfLogMessageLen;
   EFI_STATUS  Status;
-  EFI_TIME    Time;
 
-  Status = gRT->GetTime (&Time, NULL);
-  if (EFI_ERROR (Status)) {
-    ZeroMem (&Time, sizeof (Time));
-  }
-
-  EndOfLogMessageLen = AsciiSPrint (
-                         EndOfLogMessage,
-                         sizeof (EndOfLogMessage),
-                         "\n\n === END_OF_LOG === @ === %4d/%02d/%02d %d:%02d:%02d ===\n\n",
-                         (UINTN)Time.Year,
-                         (UINTN)Time.Month,
-                         (UINTN)Time.Day,
-                         (UINTN)Time.Hour,
-                         (UINTN)Time.Minute,
-                         (UINTN)Time.Second
-                         );
-
-  if (EndOfLogMessageLen > RoomLeft) {
-    EndOfLogMessageLen = RoomLeft;
-  }
+  EndOfLogMessageLen = BuildEndOfFileMarker (EndOfLogMessage, sizeof (EndOfLogMessage), RoomLeft);
 
   Status = EFI_SUCCESS;
   if (EndOfLogMessageLen > 0) {
@@ -287,6 +275,51 @@ WriteEndOfFileMarker (
 
   DEBUG ((DEBUG_INFO, "End Of File written. Code=%r\n", Status));
   return Status;
+}
+
+/**
+    BuildEndOfFileMarker - Construct the END_OF_LOG message
+
+    @param EndOfLogMessage      - Buffer to receive the marker.
+    @param EndOfLogMessageSize  - Size of EndOfLogMessage.
+    @param RoomLeft             - Space left in the log file.
+
+    @return Number of marker bytes.
+ **/
+STATIC
+UINTN
+BuildEndOfFileMarker (
+  OUT CHAR8  *EndOfLogMessage,
+  IN  UINTN  EndOfLogMessageSize,
+  IN  UINTN  RoomLeft
+  )
+{
+  UINTN       EndOfLogMessageLen;
+  EFI_STATUS  Status;
+  EFI_TIME    Time;
+
+  Status = gRT->GetTime (&Time, NULL);
+  if (EFI_ERROR (Status)) {
+    ZeroMem (&Time, sizeof (Time));
+  }
+
+  EndOfLogMessageLen = AsciiSPrint (
+                         EndOfLogMessage,
+                         EndOfLogMessageSize,
+                         "\n\n === END_OF_LOG === @ === %4d/%02d/%02d %d:%02d:%02d ===\n\n",
+                         (UINTN)Time.Year,
+                         (UINTN)Time.Month,
+                         (UINTN)Time.Day,
+                         (UINTN)Time.Hour,
+                         (UINTN)Time.Minute,
+                         (UINTN)Time.Second
+                         );
+
+  if (EndOfLogMessageLen > RoomLeft) {
+    EndOfLogMessageLen = RoomLeft;
+  }
+
+  return EndOfLogMessageLen;
 }
 
 /**
@@ -464,6 +497,62 @@ DetermineLogFile (
 }
 
 /**
+    WriteEncryptedEndOfFileMarker - Encrypt and write the END_OF_LOG marker.
+
+    The EOF marker is part of the decrypted plaintext stream. The caller advances
+    LogDevice->CurrentOffset after a successful write so AES-CTR offsets are never
+    reused by later flushes.
+
+    @param File         - Open File handle.
+    @param LogDevice    - Logger device with encryption context.
+    @param RoomLeft     - Space left in the encrypted payload region.
+    @param BytesWritten - Number of plaintext marker bytes written.
+
+    @return EFI_STATUS
+ **/
+STATIC
+EFI_STATUS
+WriteEncryptedEndOfFileMarker (
+  IN  EFI_FILE    *File,
+  IN  LOG_DEVICE  *LogDevice,
+  IN  UINTN       RoomLeft,
+  OUT UINTN       *BytesWritten
+  )
+{
+  CHAR8       EndOfLogMessage[64];
+  UINTN       EndOfLogMessageLen;
+  EFI_STATUS  Status;
+
+  if (BytesWritten == NULL) {
+    return EFI_INVALID_PARAMETER;
+  }
+
+  *BytesWritten    = 0;
+  EndOfLogMessageLen = BuildEndOfFileMarker (EndOfLogMessage, sizeof (EndOfLogMessage), RoomLeft);
+  if (EndOfLogMessageLen == 0) {
+    DEBUG ((DEBUG_INFO, "Encrypted End Of File written. Code=%r\n", EFI_SUCCESS));
+    return EFI_SUCCESS;
+  }
+
+  *BytesWritten = EndOfLogMessageLen;
+  Status        = LogEncryptorWrite (
+                    File,
+                    &LogDevice->EncryptionContext,
+                    LogDevice->CurrentOffset,
+                    EndOfLogMessage,
+                    BytesWritten
+                    );
+  if (!EFI_ERROR (Status) && (*BytesWritten != EndOfLogMessageLen)) {
+    DEBUG ((DEBUG_ERROR, "Not all bytes of encrypted EOF written to log.\n"));
+    Status = EFI_BAD_BUFFER_SIZE;
+  }
+
+  ZeroMem (EndOfLogMessage, sizeof (EndOfLogMessage));
+  DEBUG ((DEBUG_INFO, "Encrypted End Of File written. Code=%r\n", Status));
+  return Status;
+}
+
+/**
   WriteALogFIle
 
   Writes the currently unwritten part of the log file.
@@ -482,6 +571,10 @@ WriteALogFile (
   EFI_FILE    *File;
   UINTN       WriteSize;
   UINT64      RoomLeft;
+  UINT64      PayloadCapacity;
+  UINT64      PlaintextLen;
+  UINTN       EofMarkerLen;
+  BOOLEAN     EncryptionEnabled;
   EFI_STATUS  Status;
   EFI_FILE    *Volume;
 
@@ -489,8 +582,9 @@ WriteALogFile (
     return EFI_DEVICE_ERROR;
   }
 
-  File   = NULL;
-  Volume = VolumeFromFileSystemHandle (LogDevice);
+  File              = NULL;
+  Volume            = VolumeFromFileSystemHandle (LogDevice);
+  EncryptionEnabled = FeaturePcdGet (PcdAdvancedFileLoggerEncryptionEnable);
   if (NULL == Volume) {
     Status = EFI_INVALID_PARAMETER;
     goto CloseAndExit;
@@ -518,27 +612,65 @@ WriteALogFile (
     goto CloseAndExit;
   }
 
-  //
-  // Reposition the log file to the current offset.
-  //
-  Status = File->SetPosition (File, LogDevice->CurrentOffset);
-  if (EFI_ERROR (Status)) {
-    DEBUG ((DEBUG_ERROR, "%a: Failed to seek to current offset: %r !\n", __FUNCTION__, Status));
-    goto CloseAndExit;
+  if (EncryptionEnabled) {
+    Status = LogEncryptorEnsureInitialized (&LogDevice->EncryptionContext, File);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "%a: AdvancedFileLogger encryption setup failed, refusing plaintext write: %r\n", __FUNCTION__, Status));
+      goto CloseAndExit;
+    }
+
+    if (LogDevice->EncryptionContext.DataOffset >= DEBUG_LOG_FILE_SIZE) {
+      Status = EFI_BAD_BUFFER_SIZE;
+      goto CloseAndExit;
+    }
+
+    PayloadCapacity = DEBUG_LOG_FILE_SIZE - LogDevice->EncryptionContext.DataOffset;
+    if (LogDevice->CurrentOffset > PayloadCapacity) {
+      Status = EFI_BAD_BUFFER_SIZE;
+      goto CloseAndExit;
+    }
+
+    RoomLeft = PayloadCapacity - LogDevice->CurrentOffset;
+  } else {
+    //
+    // Reposition the log file to the current offset.
+    //
+    Status = File->SetPosition (File, LogDevice->CurrentOffset);
+    if (EFI_ERROR (Status)) {
+      DEBUG ((DEBUG_ERROR, "%a: Failed to seek to current offset: %r !\n", __FUNCTION__, Status));
+      goto CloseAndExit;
+    }
+
+    if (LogDevice->CurrentOffset > DEBUG_LOG_FILE_SIZE) {
+      Status = EFI_BAD_BUFFER_SIZE;
+      goto CloseAndExit;
+    }
+
+    RoomLeft = DEBUG_LOG_FILE_SIZE - LogDevice->CurrentOffset;
   }
 
-  RoomLeft = DEBUG_LOG_FILE_SIZE - LogDevice->CurrentOffset;
   Status   = AdvancedLoggerAccessLibGetNextFormattedLine (&LogDevice->AccessEntry);
 
   while (Status == EFI_SUCCESS) {
     WriteSize = LogDevice->AccessEntry.MessageLen;
     if (WriteSize > RoomLeft) {
-      WriteSize = RoomLeft;
+      WriteSize = (UINTN)RoomLeft;
       DEBUG ((DEBUG_ERROR, "Log file truncated\n"));
     }
 
     if (WriteSize > 0) {
-      Status = File->Write (File, &WriteSize, (VOID *)LogDevice->AccessEntry.Message);
+      if (EncryptionEnabled) {
+        Status = LogEncryptorWrite (
+                   File,
+                   &LogDevice->EncryptionContext,
+                   LogDevice->CurrentOffset,
+                   LogDevice->AccessEntry.Message,
+                   &WriteSize
+                   );
+      } else {
+        Status = File->Write (File, &WriteSize, (VOID *)LogDevice->AccessEntry.Message);
+      }
+
       if (EFI_ERROR (Status)) {
         DEBUG ((DEBUG_ERROR, "%a: Failed to write to log file: %r !\n", __FUNCTION__, Status));
         goto CloseAndExit;
@@ -553,11 +685,29 @@ WriteALogFile (
 
   if (Status == EFI_END_OF_FILE) {
     //
-    // Write End Of Buffer file mark.
+    // Write End Of Buffer file mark. In encrypted files this marker is encrypted
+    // and appended like normal plaintext so later flushes never reuse the same
+    // AES-CTR keystream offsets.
     //
-    Status = WriteEndOfFileMarker (File, RoomLeft);
+    EofMarkerLen = 0;
+    if (EncryptionEnabled) {
+      Status = WriteEncryptedEndOfFileMarker (File, LogDevice, (UINTN)RoomLeft, &EofMarkerLen);
+    } else {
+      Status = WriteEndOfFileMarker (File, (UINTN)RoomLeft);
+    }
+
     if (EFI_ERROR (Status)) {
       DEBUG ((DEBUG_ERROR, "%a: Failed to write end of file marker: %r !\n", __FUNCTION__, Status));
+    }
+
+    if (EncryptionEnabled && !EFI_ERROR (Status)) {
+      LogDevice->CurrentOffset += EofMarkerLen;
+      RoomLeft                 -= EofMarkerLen;
+      PlaintextLen              = LogDevice->CurrentOffset;
+      Status                    = LogEncryptorUpdatePlaintextLen (File, &LogDevice->EncryptionContext, PlaintextLen);
+      if (EFI_ERROR (Status)) {
+        DEBUG ((DEBUG_ERROR, "%a: Failed to update encrypted log plaintext length: %r !\n", __FUNCTION__, Status));
+      }
     }
   }
 
@@ -570,6 +720,7 @@ CloseAndExit:
 
   if (EFI_ERROR (Status)) {
     LogDevice->Valid = FALSE;
+    LogEncryptorReset (&LogDevice->EncryptionContext);
   }
 
   if (File != NULL) {

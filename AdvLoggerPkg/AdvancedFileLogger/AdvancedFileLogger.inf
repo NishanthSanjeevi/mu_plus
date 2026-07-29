@@ -22,18 +22,24 @@
 #
 
 [Sources]
+  AesCtr.c
+  AesCtr.h
   AdvancedFileLogger.c
   AdvancedFileLogger.h
   FileAccess.c
+  LogEncryptor.c
+  LogEncryptor.h
 
 [Packages]
   MdePkg/MdePkg.dec
   MdeModulePkg/MdeModulePkg.dec
   AdvLoggerPkg/AdvLoggerPkg.dec
+  CryptoPkg/CryptoPkg.dec
   PolicyServicePkg/PolicyServicePkg.dec
 
 [LibraryClasses]
   AdvancedLoggerAccessLib
+  BaseCryptLib
   BaseLib
   BaseMemoryLib
   DebugLib
@@ -54,15 +60,21 @@
   gEfiEventReadyToBootGuid
   gEfiEventBeforeExitBootServicesGuid
   gAdvancedFileLoggerPolicyGuid
+  gEfiRngAlgorithmRaw
 
 [Protocols]
   gEdkiiPlatformSpecificResetFilterProtocolGuid                 ## CONSUMES
+  gEfiRngProtocolGuid                                           ## CONSUMES
   gEfiSimpleFileSystemProtocolGuid                              ## CONSUMES
 
 [Pcd]
   gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedLoggerPages            ## CONSUMES
   gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedFileLoggerForceEnable  ## CONSUMES
   gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedFileLoggerFlush        ## CONSUMES
+  gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedFileLoggerEncryptionCert  ## CONSUMES
+
+[FeaturePcd]
+  gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedFileLoggerEncryptionEnable        ## CONSUMES
 
 [Depex]
   TRUE

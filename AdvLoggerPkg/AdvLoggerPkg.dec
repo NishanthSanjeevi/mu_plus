@@ -106,6 +106,10 @@
   #
   gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedLoggerHdwPortOsRuntimeDisable|TRUE|BOOLEAN|0x0001018A
 
+  ## PcdAdvancedFileLoggerEncryptionEnable - Encrypt UEFI_Log1..9 AdvancedFileLogger files.
+  #
+  gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedFileLoggerEncryptionEnable|FALSE|BOOLEAN|0x0001018B
+
 
 [PcdsFixedAtBuild]
   ## Advanced Logger Base - NULL = UEFI starts with PEI or DXE, and there is no SEC, or SEC
@@ -137,6 +141,10 @@
   ## Advanced Logger Hdw port filter ErrorLevel
   #
   gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedLoggerHdwPortDebugPrintErrorLevel|0xFFFFFFFF|UINT32|0x00010180
+
+  ## DER X.509 RSA public certificate for file log encryption.
+  #
+  gAdvLoggerPkgTokenSpaceGuid.PcdAdvancedFileLoggerEncryptionCert|{0x0}|VOID*|0x0001018C
 
 
 [UserExtensions.TianoCore."ExtraFiles"]

@@ -37,6 +37,8 @@
 #include <Library/UefiRuntimeServicesTableLib.h>
 #include <Library/PolicyLib.h>
 
+#include "LogEncryptor.h"
+
 #define LOG_DEVICE_SIGNATURE  SIGNATURE_32('D','L','o','g')
 
 #define LOG_DEVICE_FROM_LINK(a)  CR (a, LOG_DEVICE, Link, LOG_DEVICE_SIGNATURE)
@@ -48,6 +50,7 @@ typedef struct {
   UINTN                                        FileIndex;
   UINT64                                       CurrentOffset;         // Current offset to start writing
   ADVANCED_LOGGER_ACCESS_MESSAGE_LINE_ENTRY    AccessEntry;
+  ADVANCED_FILE_LOGGER_ENCRYPTION_CONTEXT      EncryptionContext;
   BOOLEAN                                      Valid;
 } LOG_DEVICE;
 
